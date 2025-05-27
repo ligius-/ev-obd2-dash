@@ -11,7 +11,15 @@
 
 #define DEBUG_PORT Serial
 
+// uncomment below if you don't want to connect to BT and just want to simulate numbers
 #define DEMO_MODE 0
+// uncomment below if you want to connect directly to MAC aa:bb:cc:11:22:33 otherwise it will connect to "OBDII"
+#define BT_QUICK_CONNECT
+// uncomment below if you want a lot of log output
+// #define DEBUG
+
+// at which voltage read from CDS (pin 34) the theme switches to dark (higher values = darker)
+#define CDS_BRIGHT_MILLIVOLTS (150)
 
 // Bluetooth Serial
 BluetoothSerial SerialBT;
@@ -19,13 +27,15 @@ ELM327 myELM327;
 
 enum PriorityLevel {
   PRIORITY_HIGH = 0,
-  PRIORITY_MEDIUM = 1,
-  PRIORITY_LOW = 2
+  PRIORITY_MEDIUM_HIGH = 1,
+  PRIORITY_MEDIUM_LOW = 2,
+  PRIORITY_LOW = 3
 };
 
 // Update rates for each priority level (in ms)
 #define RATE_HIGH 50
-#define RATE_MEDIUM 1500
+#define RATE_MEDIUM_HIGH 150
+#define RATE_MEDIUM_LOW 1000
 #define RATE_LOW 5000
 
 // Define the group within each priority level
@@ -36,18 +46,62 @@ typedef struct {
 
 // PID calculation method types
 enum CalcMethod {
-  UNSIGNED_MULT,    // buildUnsignedPayloadFromChars * multiplier
-  SIGNED_MULT16,    // buildSigned16Payload * multiplier
-  UNSIGNED_OFFSET,  // buildSignedPayloadFromChars + offset
-  POWER_CALC,       // Special calculation for power (kW) = value1 * value2 / 1000
-  MOTOR_POWER,      // Motor power (kW) = (RPM * Torque) / 9.549
-  HVB_TEMP_MODE,    // Special case for battery temp mode
+  UNSIGNED_MULT_OFFSET,  // buildUnsignedPayloadFromChars * multiplier(param1) + offset (param2)
+  SIGNED_MULT16,         // buildSigned16Payload * multiplier
+  MULTIPLIER_CALC,       // Special calculation for power (kW) = value1 * value2 / 1000;
+  DIVIDER_CALC,          // First parameter is the multiplier for everything
+  MOTOR_POWER_CALC,      // Motor power (kW) = (RPM * Torque) / 9.549
+  HVB_TEMP_MODE_CALC,    // Special case for battery temp mode
 };
+
+#define PID_LIST                                                                                                                            \
+  /* Basic readings (independent values) */                                                                                                 \
+  /* HIGH PRIORITY GROUP - HVB Power components */                                                                                          \
+  X(HVB_VOLTAGE, "7e4", "22480D", UNSIGNED_MULT_OFFSET, 0.01, 0, 6, 4, PRIORITY_HIGH, 0, 1, PID_NONE, PID_NONE, "", "V")                    \
+  X(HVB_CURRENT, "7e4", "2248F9", SIGNED_MULT16, 0.1, 0, 6, 4, PRIORITY_HIGH, 0, 1, PID_NONE, PID_NONE, "", "A")                            \
+                                                                                                                                            \
+  /* MEDIUM HIGH PRIORITY GROUP - Motor values */                                                                                           \
+  /*X(PRI_MO_RPM, "7e6",  "221E2C", UNSIGNED_MULT_OFFSET, 1, 0, 6, 4, PRIORITY_MEDIUM_HIGH, 0, 2, PID_NONE, PID_NONE, "", "Rpm")     */     \
+  X(PRI_MO_TORQUE, "7e6", "22481C", SIGNED_MULT16, 0.1, -200, 6, 4, PRIORITY_MEDIUM_HIGH, 0, 2, PID_NONE, PID_NONE, "", " Nm")              \
+  /*X(SEC_MO_RPM, "7e7", "224821", UNSIGNED_MULT_OFFSET, 1, 0, 6, 4, PRIORITY_MEDIUM_HIGH, 1, 2, PID_NONE, PID_NONE, "", "Rpm")      */     \
+  X(SEC_MO_TORQUE, "7e7", "22481A", SIGNED_MULT16, 0.1, -200, 6, 4, PRIORITY_MEDIUM_HIGH, 1, 2, PID_NONE, PID_NONE, "", " Nm")              \
+                                                                                                                                            \
+  /* MEDIUM LOW PRIORITY GROUP */                                                                                                           \
+  X(VEHICLE_SPEED_HR, "7e0", "221505", UNSIGNED_MULT_OFFSET, 0.0078125, 0, 6, 4, PRIORITY_MEDIUM_LOW, 0, 1, PID_NONE, PID_NONE, "", "km/h") \
+                                                                                                                                            \
+  /* LOW PRIORITY GROUP - Various measurements */                                                                                           \
+  X(HVB_TEMP, "7e4", "224800", UNSIGNED_MULT_OFFSET, 1, -50, 6, 2, PRIORITY_LOW, 0, 10, PID_NONE, PID_NONE, "", "°C")                       \
+  X(SOC, "7e4", "224801", UNSIGNED_MULT_OFFSET, 0.002, 0, 6, 4, PRIORITY_LOW, 1, 10, PID_NONE, PID_NONE, "", " %")                          \
+  X(INT_TEMP, "7e2", "22DD04", UNSIGNED_MULT_OFFSET, 1, -40, 6, 2, PRIORITY_LOW, 2, 10, PID_NONE, PID_NONE, "", "°C")                       \
+  X(HVB_MODE, "7e6", "2248E0", HVB_TEMP_MODE_CALC, 0, 0, 6, 2, PRIORITY_LOW, 3, 10, PID_NONE, PID_NONE, "", "")                             \
+  X(LVB_SOC, "726", "224028", UNSIGNED_MULT_OFFSET, 1, 0, 6, 2, PRIORITY_LOW, 4, 10, PID_NONE, PID_NONE, "", "%")                           \
+  X(LVB_VOLTAGE, "726", "22402a", UNSIGNED_MULT_OFFSET, 0.05, 6, 6, 2, PRIORITY_LOW, 5, 10, PID_NONE, PID_NONE, "", "V")                    \
+  /*X(LVB_CURRENT, "726", "22402b", UNSIGNED_MULT_OFFSET, 1, -127, 6, 2, PRIORITY_LOW, 6, 10, PID_NONE, PID_NONE, "", "A")      */          \
+  /*X(COOL_HEAT_POWER, "7e6", "2248de", UNSIGNED_MULT_OFFSET, 0.001, 0, 6, 4, PRIORITY_LOW, 7, 10, PID_NONE, PID_NONE, "", "kW")*/          \
+  X(PRI_MO_TEMP, "7e6", "22481f", SIGNED_MULT16, 1, 0, 6, 4, PRIORITY_LOW, 8, 10, PID_NONE, PID_NONE, "", "°C")                             \
+  X(SEC_MO_TEMP, "7e7", "224820", SIGNED_MULT16, 1, 0, 6, 4, PRIORITY_LOW, 9, 10, PID_NONE, PID_NONE, "", "°C")                             \
+                                                                                                                                            \
+  /* Calculated values (dependent on other PIDs) */                                                                                         \
+  X(HVB_POWER, "", "", MULTIPLIER_CALC, 0.001, 0, 0, 0, PRIORITY_HIGH, 0, 1, HVB_VOLTAGE, HVB_CURRENT, "", "kW")                            \
+  /*X(PRI_MO_POWER, "", "", MOTOR_POWER_CALC, 0, 0, 0, 0, PRIORITY_MEDIUM, 0, 2, PRI_MO_RPM, PRI_MO_TORQUE, "", " kW")*/                    \
+  /*X(SEC_MO_POWER, "", "", MOTOR_POWER_CALC, 0, 0, 0, 0, PRIORITY_MEDIUM, 1, 2, SEC_MO_RPM, SEC_MO_TORQUE, "", " kW")*/                    \
+  X(POWER_PER_100KM, "", "", DIVIDER_CALC, 100, 0, 6, 4, PRIORITY_MEDIUM_LOW, 0, 2, HVB_POWER, VEHICLE_SPEED_HR, "", "")
+
+// First usage - Enum definition
+// Define X for enum usage
+#define X(id, header, pid, method, p1, p2, start, num, level, g1, g2, d1, d2, pre, suf) id,
+typedef enum {
+  PID_NONE = -1,  // Special value for "no dependency"
+  PID_LIST
+      PID_COUNT
+} PID_ID;
+#undef X  // Important: Undefine X before redefining it
 
 // PID information structure
 typedef struct {
-  const char *name;      // Human-readable name
-  const char *pid;       // Full PID with 22 prefix
+  PID_ID id;
+  const char *header;    // OBD2 header
+  const char *pid;       // OBD2 PID with 22 prefix
   CalcMethod method;     // Calculation method
   float param1;          // First parameter (multiplier or offset)
   float param2;          // Second parameter if needed
@@ -59,34 +113,25 @@ typedef struct {
   float value;           // Current value
   bool valid;            // Is the value valid?
   lv_obj_t *displayObj;  // Primary LVGL object to display this value
-  int dependsOn[2];      // Index of PIDs this one depends on (-1 if none)
+  PID_ID dependsOn[2];   // PIDs this one depends on (-1 if none)
   char strValue[16];     // String prefix for display
   char suffix[8];        // String suffix for display
 } PID_t;
 
-// The order matters for dependencies (dependent PIDs should come after their dependencies)
+// Redefine X for struct initialization
+#define X(id, header, pid, method, p1, p2, start, num, level, g1, g2, d1, d2, pre, suf) \
+  {id, header, pid, method, p1, p2, start, num, level, {g1, g2}, 0, 0, false, NULL, {d1, d2}, pre, suf},
+
+// Create the array using PID_LIST
 PID_t pids[] = {
-    // Basic readings (independent values)
-    // HIGH PRIORITY GROUP - HVB Power components (1 group)
-    {"HVB Voltage", "22480D", UNSIGNED_MULT, 0.01, 0, 6, 4, PRIORITY_HIGH, {0, 1}, 0, 0, false, NULL, {-1, -1}, "", "V"},
-    {"HVB Current", "22480B", SIGNED_MULT16, 0.02, 0, 6, 4, PRIORITY_HIGH, {0, 1}, 0, 0, false, NULL, {-1, -1}, "", "A"},
+    PID_LIST};
+#undef X  // Clean up by undefining X again
 
-    // MEDIUM PRIORITY GROUP - Motor values (2 groups)
-    {"Pri Mo RPM", "221E2C", UNSIGNED_MULT, 1, 0, 6, 4, PRIORITY_MEDIUM, {0, 2}, 0, 0, false, NULL, {-1, -1}, "", "Rpm"},
-    {"Pri Mo Torque", "22481C", SIGNED_MULT16, 0.1, -200, 6, 4, PRIORITY_MEDIUM, {0, 2}, 0, 0, false, NULL, {-1, -1}, "", "Nm"},
-    {"Sec Mo RPM", "224821", UNSIGNED_MULT, 1, 0, 6, 4, PRIORITY_MEDIUM, {1, 2}, 0, 0, false, NULL, {-1, -1}, "", "Rpm"},
-    {"Sec Mo Torque", "22481A", SIGNED_MULT16, 0.1, -200, 6, 4, PRIORITY_MEDIUM, {1, 2}, 0, 0, false, NULL, {-1, -1}, "", "Nm"},
-
-    // LOW PRIORITY GROUP - Various measurements (4 groups)
-    {"HVB Temp", "224800", UNSIGNED_OFFSET, -50, 0, 6, 2, PRIORITY_LOW, {0, 4}, 0, 0, false, NULL, {-1, -1}, "", "°C"},
-    {"SOC", "224801", UNSIGNED_MULT, 0.002, 0, 6, 4, PRIORITY_LOW, {1, 4}, 0, 0, false, NULL, {-1, -1}, "", " %"},
-    {"Int Temp", "22DD04", UNSIGNED_OFFSET, -40, 0, 6, 2, PRIORITY_LOW, {2, 4}, 0, 0, false, NULL, {-1, -1}, "", "°C"},
-    {"HVB Mode", "2248E0", HVB_TEMP_MODE, 0, 0, 6, 2, PRIORITY_LOW, {3, 4}, 0, 0, false, NULL, {-1, -1}, "", ""},
-
-    // Calculated values (dependent on other PIDs)
-    {"HVB Power", "", POWER_CALC, 0.001, 0, 0, 0, PRIORITY_HIGH, {0, 1}, 0, 0, false, NULL, {0, 1}, "", ""},
-    {"Pri Mo Power", "", MOTOR_POWER, 0, 0, 0, 0, PRIORITY_MEDIUM, {0, 2}, 0, 0, false, NULL, {2, 3}, "", " kW"},
-    {"Sec Mo Power", "", MOTOR_POWER, 0, 0, 0, 0, PRIORITY_MEDIUM, {1, 2}, 0, 0, false, NULL, {4, 5}, "", " kW"}};
+PID_t *getPID(PID_ID id) {
+  if (id < 0 || id >= PID_COUNT)
+    return NULL;
+  return &pids[id];
+}
 
 // Track the current group being processed for each priority level
 typedef struct {
@@ -95,93 +140,24 @@ typedef struct {
   uint32_t updateRate;
 } PriorityState;
 
-PriorityState priorityStates[3];
+PriorityState priorityStates[4];
+
+uint32_t cds_value;
 
 // Forward declarations
 uint8_t ctoi(uint8_t value);
 uint64_t buildUnsignedPayloadFromChars(uint8_t startOffset, uint8_t numPayChars);
 int16_t buildSigned16Payload(uint8_t startOffset);
 void updatePID(int index);
-void createUI();
 void updateDisplayForPID(int index);
 void fillBatteryMode(uint8_t mode, char buffer[32]);
-void displayConnectionError();
+void handleBrightness();
 
 const int NUM_PIDS = sizeof(pids) / sizeof(PID_t);
 
-void my_log_cb(const char *buf) {
-  Serial.print(buf);
+void my_log_cb(lv_log_level_t level, const char *buf) {
+  Serial.printf("[%d] %s\n", level, buf);
   Serial.flush();
-}
-
-void setup() {
-  // Initialize priority states
-  priorityStates[PRIORITY_HIGH].currentGroup = 0;
-  priorityStates[PRIORITY_HIGH].nextUpdateTime = 0;
-  priorityStates[PRIORITY_HIGH].updateRate = RATE_HIGH;
-
-  priorityStates[PRIORITY_MEDIUM].currentGroup = 0;
-  priorityStates[PRIORITY_MEDIUM].nextUpdateTime = 0;
-  priorityStates[PRIORITY_MEDIUM].updateRate = RATE_MEDIUM;
-
-  priorityStates[PRIORITY_LOW].currentGroup = 0;
-  priorityStates[PRIORITY_LOW].nextUpdateTime = 0;
-  priorityStates[PRIORITY_LOW].updateRate = RATE_LOW;
-
-  Serial.begin(115200);
-  Serial.println("ESP32 EV Data Monitor with LVGL");
-
-  lv_log_register_print_cb(my_log_cb);
-
-  // Initialize display
-
-  smartdisplay_init();
-
-  auto display = lv_disp_get_default();
-  lv_disp_set_rotation(display, LV_DISP_ROT_270);
-
-  lv_obj_t *label = lv_label_create(lv_scr_act());
-  lv_label_set_text(label, "Initializing bluetooth...");
-  lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
-
-  lv_timer_handler();
-
-  // Initialize Bluetooth
-  if (!DEMO_MODE) {
-    // SerialBT.enableSSP();
-    //SerialBT.respondPasskey(1234);
-    SerialBT.begin("ESP32_EV_Monitor", true, true);
-  }
-
-  Serial.println("Bluetooth initialized, connecting to ELM327...");
-  lv_label_set_text(label, "Bluetooth initialized, connecting to ELM327...");
-  lv_timer_handler();
-
-  if (!DEMO_MODE) {
-    // SerialBT.setPin("1234");
-    if (!SerialBT.connect("OBDII")) {
-      DEBUG_PORT.println("Couldn't connect to OBD scanner - Phase 1");
-      lv_label_set_text(label, "Couldn't connect to OBD scanner - Phase 1");
-      lv_timer_handler();
-      while (1);
-    }
-
-    // Connect to ELM327 adapter
-    if (!myELM327.begin(SerialBT, false, 1000)) {
-      Serial.println("Couldn't connect to OBD scanner - phase 2");
-      lv_label_set_text(label, "Couldn't connect to OBD scanner - Phase 2");
-      lv_timer_handler();
-      while (1);
-    }
-  }
-
-  Serial.println("Connected to ELM327");
-  lv_label_set_text(label, "Connected to ELM327");
-  lv_timer_handler();
-
-  delay(100);
-
-  ui_init();
 }
 
 // Process all PIDs in a specific priority group
@@ -195,6 +171,109 @@ void processPriorityGroup(PriorityLevel level, uint8_t groupId, unsigned long cu
       updatePID(i);
     }
   }
+}
+
+void keyRequestCallback() {
+  SerialBT.respondPasskey(1234);
+}
+
+void confirmRequestCallback(uint32_t numVal) {
+  SerialBT.confirmReply(true);
+}
+
+void setup() {
+  // Initialize priority states
+  priorityStates[PRIORITY_HIGH].currentGroup = 0;
+  priorityStates[PRIORITY_HIGH].nextUpdateTime = 0;
+  priorityStates[PRIORITY_HIGH].updateRate = RATE_HIGH;
+
+  priorityStates[PRIORITY_MEDIUM_HIGH].currentGroup = 0;
+  priorityStates[PRIORITY_MEDIUM_HIGH].nextUpdateTime = 0;
+  priorityStates[PRIORITY_MEDIUM_HIGH].updateRate = RATE_MEDIUM_HIGH;
+
+  priorityStates[PRIORITY_MEDIUM_LOW].currentGroup = 0;
+  priorityStates[PRIORITY_MEDIUM_LOW].nextUpdateTime = 0;
+  priorityStates[PRIORITY_MEDIUM_LOW].updateRate = RATE_MEDIUM_LOW;
+
+  priorityStates[PRIORITY_LOW].currentGroup = 0;
+  priorityStates[PRIORITY_LOW].nextUpdateTime = 0;
+  priorityStates[PRIORITY_LOW].updateRate = RATE_LOW;
+
+  Serial.begin(115200);
+  Serial.println("ESP32 EV Data Monitor with LVGL");
+
+  // lv_log_register_print_cb(my_log_cb);
+
+  // Initialize display
+
+  smartdisplay_init();
+
+  lv_obj_t *label = lv_label_create(lv_scr_act());
+  lv_label_set_text(label, "Initializing bluetooth...");
+  lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
+  lv_timer_handler();
+
+  // Initialize Bluetooth
+  if (!DEMO_MODE) {
+    SerialBT.end();
+    SerialBT.disableSSP();
+    // SerialBT.setPin("1234", 4);
+    // memcpy(pinCode, "1234", 4);
+    // esp_bt_gap_set_pin(ESP_BT_PIN_TYPE_FIXED, 4, pinCode);
+    // SerialBT._pin_code_len = 4;
+    if (!SerialBT.begin("ESP32_EV_Monitor", true, true)) {
+      lv_label_set_text(label, "Couldn't start BT");
+      lv_tick_inc(50);
+      lv_timer_handler();
+      while (1);
+    }
+  }
+
+  Serial.println("Bluetooth initialized, connecting to ELM327...");
+  lv_label_set_text(label, "BT initialized, connecting to ELM327...");
+  lv_tick_inc(50);
+  lv_timer_handler();
+
+  if (!DEMO_MODE) {
+    SerialBT.onKeyRequest(keyRequestCallback);
+    SerialBT.onConfirmRequest(confirmRequestCallback);
+    SerialBT.setPin("1234", 4);
+
+#ifdef BT_QUICK_CONNECT
+    uint8_t addr[6] = {0xaa, 0xbb, 0xcc, 0x11, 0x22, 0x33};
+    if (!SerialBT.connect(addr, 1, ESP_SPP_SEC_ENCRYPT | ESP_SPP_SEC_AUTHENTICATE, ESP_SPP_ROLE_MASTER)) {
+      // if (!SerialBT.connect(BTAddress("aabbcc112233"))) {
+#else
+    if (!SerialBT.connect("OBDII")) {
+#endif
+      DEBUG_PORT.println("Cannot connect to OBD scanner - 1");
+      lv_label_set_text(label, "Cannot connect to OBD scanner - 1");
+      lv_tick_inc(50);
+      lv_timer_handler();
+      while (1);
+    }
+
+    // Connect to ELM327 adapter
+    if (!myELM327.begin(SerialBT, false, 1000)) {
+      Serial.println("Cannot connect to OBD scanner - 2");
+      lv_label_set_text(label, "Cannot connect to OBD scanner - 2");
+      lv_tick_inc(50);
+      lv_timer_handler();
+      while (1);
+    }
+  }
+
+  Serial.println("Connected to ELM327");
+  lv_label_set_text(label, "Connected to ELM327, reading all values");
+  lv_tick_inc(1);
+  lv_timer_handler();
+
+  // read all values once
+  for (int i = 0; i < NUM_PIDS; i++) {
+    updatePID(i);
+  }
+
+  ui_init();
 }
 
 // Process all calculated values
@@ -218,16 +297,22 @@ void processCalculatedValues(unsigned long currentTime) {
 
         if (currentTime - pids[i].lastUpdate >= updateRate) {
           // Calculate the value based on the method
-          if (pids[i].method == POWER_CALC) {
-            // Power (kW) = voltage * current * 0.001
+          if (pids[i].method == MULTIPLIER_CALC) {
+            // A * B * p1 - Power (kW) = voltage * current * 0.001
             pids[i].value = pids[pids[i].dependsOn[0]].value *
                             pids[pids[i].dependsOn[1]].value *
                             pids[i].param1;
-          } else if (pids[i].method == MOTOR_POWER) {
+          } else if (pids[i].method == MOTOR_POWER_CALC) {
+            // TODO: convert to multiplier_calc
             // Motor power (kW) = (RPM * Torque) / 9.549 / 1000
             pids[i].value = (pids[pids[i].dependsOn[0]].value *
                              pids[pids[i].dependsOn[1]].value) /
                             9.549 * 0.001;
+          } else if (pids[i].method == DIVIDER_CALC) {
+            // A/B * p1
+            pids[i].value = (pids[pids[i].dependsOn[0]].value /
+                             pids[pids[i].dependsOn[1]].value) *
+                            pids[i].param1;
           }
 
           pids[i].valid = true;
@@ -241,7 +326,7 @@ void processCalculatedValues(unsigned long currentTime) {
   }
 }
 
-int demoTick;
+int demoTick = 0;
 auto lv_last_tick = millis();
 
 void loop() {
@@ -285,9 +370,12 @@ void loop() {
   if (currentTime - lastDebugPrint >= 1000) {
     lastDebugPrint = currentTime;
 
-    if (pids[10].valid && pids[11].valid && pids[12].valid) {
-      Serial.printf("Power values - HVB: %f  kW, Pri: %f kW, Sec: %f kW\n", pids[10].value, pids[11].value, pids[12].value);
+    if (pids[HVB_POWER].valid) {
+      Serial.printf("Power values - HVB: %f kW V: %fV I: %fA Speed: %f km/h \n",
+                    pids[HVB_POWER].value, pids[HVB_VOLTAGE].value, pids[HVB_CURRENT].value, pids[VEHICLE_SPEED_HR].value);
     }
+
+    handleBrightness();
   }
 
   if (currentTime % 20 == 0) {
@@ -296,7 +384,7 @@ void loop() {
   }
 
   // Update the ticker
-  // lv_tick_inc(currentTime - lv_last_tick);
+  lv_tick_inc(currentTime - lv_last_tick);
   lv_last_tick = currentTime;
 
   // lv_task_handler();
@@ -304,46 +392,69 @@ void loop() {
   ui_tick();
 }
 
+const char *lastHeader;
 void updatePID(int index) {
   if (DEMO_MODE) {
     // DEMO MODE
 
     switch (index) {
-      case 0:  // HvbV
+      case HVB_VOLTAGE:  // HvbV
         pids[index].value = 350;
         break;
-      case 1:  // HVb C
+      case HVB_CURRENT:  // HVb C
         pids[index].value = abs((demoTick % 250) - 125) * -8 + 500;
         break;
-      case 2:  // PriRpm
-        pids[index].value = 1500;
-        break;
-      case 3:  // PriTq
+      // case PRI_MO_RPM:  // PriRpm
+      //   pids[index].value = 1500;
+      //   break;
+      case PRI_MO_TORQUE:  // PriTq
         pids[index].value = ((demoTick % 250) - 150) * 5;
         break;
-      case 4:  // SecRpm
-        pids[index].value = 1500;
-        break;
-      case 5:  // SecTq
+      // case 4:  // SecRpm
+      //   pids[index].value = 1500;
+      //   break;
+      case SEC_MO_TORQUE:  // SecTq
         pids[index].value = ((demoTick % 100) - 30) * 5;
         break;
-      case 6:  // HvbT
+      case HVB_TEMP:  // HvbT
         pids[index].value = 15 + (demoTick % 40) / 5;
         break;
-      case 7:  // SoC
+      case SOC:  // SoC
         pids[index].value = 90.3 - (demoTick % 32) / 10;
         break;
-      case 8:  // IntT
+      case INT_TEMP:  // IntT
         pids[index].value = 18 + (demoTick % 80) / 10;
         break;
-      case 9:  // Hvb Mode
+      case HVB_MODE:  // Hvb Mode
         pids[index].value = demoTick % 5;
         break;
+      case LVB_SOC:
+        pids[index].value = 75;
+        break;
+      case LVB_VOLTAGE:
+        pids[index].value = 13.5;
+        break;
+      // case LVB_CURRENT:
+      //   pids[index].value = -3.6;
+      //   break;
+      // case COOL_HEAT_POWER:
+      //   pids[index].value = 15 - (demoTick % 40) / 5;
+      //   break;
+      case PRI_MO_TEMP:
+        pids[index].value = 40 + (demoTick % 40) / 5;
+        break;
+      case SEC_MO_TEMP:
+        pids[index].value = 50 + (demoTick % 40) / 6;
+        break;
+      case VEHICLE_SPEED_HR:
+        pids[index].value = 90 + (demoTick % 20) / 3;
+        break;
       default:
+        if (pids[index].dependsOn[0] == -1) {
+          Serial.printf("Warning, no demo value defined PID index %i", index);
+        }
         break;
     }
-
-    // Serial.println(pids[index].pid);
 
     pids[index].valid = true;
     pids[index].lastUpdate = millis();
@@ -353,48 +464,65 @@ void updatePID(int index) {
   } else {
     // NOT DEMO MODE
 
-    // myELM327.timeout_ms = 200;
-    myELM327.sendCommand_Blocking(pids[index].pid);
-    if (myELM327.nb_rx_state != ELM_SUCCESS) {
-      Serial.printf("Failed to send command: %s code %d", pids[index].pid, myELM327.get_response());
-      delay(200);
-      return;
+    const char *header = pids[index].header;
+    if (header != NULL && strcmp(header, "") != 0 && (lastHeader == NULL || strcmp(header, lastHeader) != 0)) {
+      char command[20];
+      sprintf(command, SET_HEADER, header);
+      myELM327.sendCommand_Blocking(command);
+      // TODO: error checking
+      lastHeader = header;
     }
 
-    // if (myELM327.nb_rx_state == ELM_SUCCESS) {
-    // Calculate the value based on the method
-    if (pids[index].method == UNSIGNED_MULT) {
-      uint64_t raw = buildUnsignedPayloadFromChars(pids[index].startOffset, pids[index].numChars);
-      pids[index].value = raw * pids[index].param1;
-    } else if (pids[index].method == SIGNED_MULT16) {
-      int16_t raw = buildSigned16Payload(pids[index].startOffset);
-      if (raw == -32768) {
-        // sometimes we get 0x8000 back, no idea why
+    myELM327.sendCommand_Blocking(pids[index].pid);
+
+    if (myELM327.nb_rx_state != ELM_SUCCESS) {
+      Serial.printf("Failed to send command: %s code %d\n", pids[index].pid, myELM327.get_response());
+
+      myELM327.sendCommand_Blocking("AT SH 726");
+      myELM327.sendCommand_Blocking(pids[index].pid);
+      uint32_t startTime = millis();
+      if (myELM327.nb_rx_state != ELM_SUCCESS) {
+        Serial.printf("Failed to send command again: %s code %d\n", pids[index].pid, myELM327.get_response());
+        delay(200);
         return;
       }
-      pids[index].value = raw * pids[index].param1;
-    } else if (pids[index].method == UNSIGNED_OFFSET) {
-      int64_t raw = buildUnsignedPayloadFromChars(pids[index].startOffset, pids[index].numChars);
-      pids[index].value = raw + pids[index].param1;
-    } else if (pids[index].method == HVB_TEMP_MODE) {
-      // Special case for battery temp mode
-      uint64_t raw = buildUnsignedPayloadFromChars(pids[index].startOffset, pids[index].numChars);
-      pids[index].value = (float)raw;  // Use raw value for mode
     }
 
-    pids[index].valid = true;
-    pids[index].lastUpdate = millis();
+#ifdef DEBUG
+    if (myELM327.nb_rx_state == ELM_SUCCESS) {
+#endif
+      // Calculate the value based on the method
+      if (pids[index].method == UNSIGNED_MULT_OFFSET) {
+        uint64_t raw = buildUnsignedPayloadFromChars(pids[index].startOffset, pids[index].numChars);
+        pids[index].value = raw * pids[index].param1 + pids[index].param2;
+      } else if (pids[index].method == SIGNED_MULT16) {
+        int16_t raw = buildSigned16Payload(pids[index].startOffset);
+        if (raw == -32768) {
+          // sometimes we get 0x8000 back, no idea why
+          return;
+        }
+        pids[index].value = raw * pids[index].param1;
+      } else if (pids[index].method == HVB_TEMP_MODE_CALC) {
+        // Special case for battery temp mode
+        uint64_t raw = buildUnsignedPayloadFromChars(pids[index].startOffset, pids[index].numChars);
+        pids[index].value = (float)raw;  // Use raw value for mode
+      }
 
-    // Update the display for this PID
-    updateDisplayForPID(index);
+      pids[index].valid = true;
+      pids[index].lastUpdate = millis();
 
-    // Serial.print(pids[index].name);
-    // Serial.print(": ");
-    // Serial.println(pids[index].value);
-    // } else {
-    // myELM327.printError();
-    // pids[index].valid = false;
-    // }
+      // Update the display for this PID
+      updateDisplayForPID(index);
+
+#ifdef DEBUG
+      Serial.print(pids[index].name);
+      Serial.print(": ");
+      Serial.println(pids[index].value);
+    } else {
+      myELM327.printError();
+      pids[index].valid = false;
+    }
+#endif
   }
 }
 
@@ -460,107 +588,110 @@ int16_t buildSigned16Payload(uint8_t startOffset) {
 
   uint16_t combined = (byte1 << 8) | byte2;
 
-  // Serial.print("Received: ");
-  // for (uint8_t i = 0; i < 4; i++) {
-  //   Serial.print(myELM327.payload[startOffset + i]);
-  // }
-  // Serial.print(" decoded: ");
-  // Serial.println((int16_t)combined);
+#ifdef DEBUG
+  Serial.print("Received: ");
+  for (uint8_t i = 0; i < 4; i++) {
+    Serial.print(myELM327.payload[startOffset + i]);
+  }
+  Serial.print(" decoded: ");
+  Serial.println((int16_t)combined);
+#endif
 
   return (int16_t)combined;
 }
 
-char *buildTextForPid(char *buffer, uint8_t pid, uint8_t precision = 0) {
-  sprintf(buffer, "%s%.*f%s", pids[pid].strValue, precision, pids[pid].value, pids[pid].suffix);
+uint32_t lastTheme = THEME_ID_LIGHT;
+void handleBrightness() {
+#ifdef BOARD_HAS_CDS
+  cds_value = analogReadMilliVolts(CDS);
+  if (cds_value > CDS_BRIGHT_MILLIVOLTS) {
+    if (lastTheme != THEME_ID_DARK) {
+      analogWrite(GPIO_BCKL, 100);
+      change_color_theme(THEME_ID_DARK);
+      lastTheme = THEME_ID_DARK;
+    }
+  } else {
+    if (lastTheme != THEME_ID_LIGHT) {
+      analogWrite(GPIO_BCKL, 255);  // maximum brightness
+      change_color_theme(THEME_ID_LIGHT);
+      lastTheme = THEME_ID_LIGHT;
+    }
+  }
+#endif
+}
+
+char *buildTextForPid(char *buffer, uint8_t pid, uint8_t precision = 0, boolean useSuffix = true) {
+  sprintf(buffer, "%s%.*f%s", pids[pid].strValue, precision, pids[pid].value, useSuffix ? pids[pid].suffix : "");
   return buffer;
 }
 
-float get_var_pri_motor_power() {
-  return pids[11].value;
-}
-void set_var_pri_motor_power(float value) {}
+// String buffer for each PID value
+#define MAX_PID_STR_LENGTH 30
+struct PidStringBuffer {
+  char buffer[MAX_PID_STR_LENGTH];
+};
 
-char pri_motor_power_str[30] = {0};
-const char *get_var_pri_motor_power_str() {
-  return buildTextForPid(pri_motor_power_str, 11);
-}
-void set_var_pri_motor_power_str(const char *value) {}
+// Array of buffers for all PIDs
+PidStringBuffer pidStrBuffers[PID_COUNT];
 
-float get_var_sec_motor_power() {
-  return pids[12].value;
-}
-void set_var_sec_motor_power(float value) {}
+// Template for generating getter functions for float values
+#define DEFINE_FLOAT_GETTER(name, pid_id) \
+  float get_var_##name() {                \
+    return pids[pid_id].value;            \
+  }                                       \
+  void set_var_##name(float value) {}
 
-char sec_motor_power_str[30] = {0};
-const char *get_var_sec_motor_power_str() {
-  return buildTextForPid(sec_motor_power_str, 12);
-}
-void set_var_sec_motor_power_str(const char *value) {}
+// Template for generating getter functions for string values
+#define DEFINE_STRING_GETTER_STR(name, pid_id, precision, useSuffix)                    \
+  const char *get_var_##name##_str() {                                                  \
+    return buildTextForPid(pidStrBuffers[pid_id].buffer, pid_id, precision, useSuffix); \
+  }                                                                                     \
+  void set_var_##name##_str(const char *value) {}
 
-float get_var_power() {
-  return pids[10].value;
-}
-void set_var_power(float value) {}
+#define DEFINE_STRING_GETTER(name, pid_id, precision, useSuffix)                        \
+  const char *get_var_##name() {                                                        \
+    return buildTextForPid(pidStrBuffers[pid_id].buffer, pid_id, precision, useSuffix); \
+  }                                                                                     \
+  void set_var_##name(const char *value) {}
 
-char power_str[30] = {0};
-const char *get_var_power_str() {
-  return buildTextForPid(power_str, 10, 1);
-}
-void set_var_power_str(const char *value) {}
+// Template for defining both float and string getters
+#define DEFINE_PID_ACCESSORS(name, pid_id, precision, suffix) \
+  DEFINE_FLOAT_GETTER(name, pid_id)                           \
+  DEFINE_STRING_GETTER_STR(name, pid_id, precision, suffix)
 
-char int_temp_str[30] = {0};
-const char *get_var_int_temp() {
-  return buildTextForPid(int_temp_str, 8);
-}
-void set_var_int_temp(const char *value) {}
+DEFINE_PID_ACCESSORS(power, HVB_POWER, 1, false)
+// DEFINE_PID_ACCESSORS(pri_motor_power, PRI_MO_POWER, 0, true)
+// DEFINE_PID_ACCESSORS(sec_motor_power, SEC_MO_POWER, 0, true)
 
-char bat_temp_str[30] = {0};
-const char *get_var_bat_temp() {
-  return buildTextForPid(bat_temp_str, 6);
-}
-void set_var_bat_temp(const char *value) {}
+DEFINE_STRING_GETTER(int_temp, INT_TEMP, 0, true)
+DEFINE_STRING_GETTER(bat_temp, HVB_TEMP, 0, true)
+DEFINE_STRING_GETTER(soc, SOC, 1, true)
+DEFINE_PID_ACCESSORS(pri_mot_tq, PRI_MO_TORQUE, 0, true)
+// DEFINE_STRING_GETTER_STR(coolheat_pwr, COOL_HEAT_POWER, 0, true)
+DEFINE_STRING_GETTER_STR(lvb_soc, LVB_SOC, 0, true)
+DEFINE_STRING_GETTER_STR(lvb_v, LVB_VOLTAGE, 1, true)
+// DEFINE_STRING_GETTER_STR(lvb_current, LVB_CURRENT, 1, true)
+DEFINE_STRING_GETTER_STR(pri_mot_temp, PRI_MO_TEMP, 0, true)
+DEFINE_STRING_GETTER_STR(sec_mot_temp, SEC_MO_TEMP, 0, true)
 
-char soc_str[30] = {0};
-const char *get_var_soc() {
-  return buildTextForPid(soc_str, 7);
-}
-void set_var_soc(const char *value) {}
+DEFINE_STRING_GETTER(kwh_per_100kmh, POWER_PER_100KM, 1, false)
 
-char bat_mode_str[30] = {0};
 const char *get_var_bat_mode() {
-  fillBatteryMode(pids[9].value, bat_mode_str);
-  return bat_mode_str;
+  fillBatteryMode(pids[HVB_MODE].value, pidStrBuffers[HVB_MODE].buffer);
+  return pidStrBuffers[HVB_MODE].buffer;
 }
 void set_var_bat_mode(const char *value) {}
 
-// lv_anim_t pri_motor_meter_anim;
-// static void setValueIndicator(void * indic, int32_t v)
-// {
-//     lv_meter_set_indicator_value((lv_meter_t *)objects.pri_motor_meter, indic, v);
-// }
+float get_var_sec_mot_tq() {
+  // XXX: negative value is required to move the right way
+  return -pids[SEC_MO_TORQUE].value;
+}
+void set_var_sec_mot_tq(float value) {}
+DEFINE_STRING_GETTER_STR(sec_mot_tq, SEC_MO_TORQUE, 0, true)
 
-// void tick_screen_page1() {
-//     {
-//         lv_meter_indicator_t *indicator;
-
-//         lv_ll_t *indicators = &((lv_meter_t *)objects.pri_motor_meter)->indicator_ll;
-//         int index = 0;
-//         for (indicator = _lv_ll_get_tail(indicators); index > 0 && indicator != NULL; indicator = _lv_ll_get_prev(indicators, indicator), index--);
-
-//         if (indicator) {
-//             int32_t new_val = get_var_pri_motor_power();
-//             int32_t cur_val = indicator->start_value;
-//             if (new_val != cur_val) {
-
-//                 lv_anim_init(&pri_motor_meter_anim);
-//                 lv_anim_set_exec_cb(&pri_motor_meter_anim, setValueIndicator);
-//                 lv_anim_set_var(&pri_motor_meter_anim, indicator);
-//                 // lv_anim_set_time(&pri_motor_meter_anim, 500);
-//                 tick_value_change_obj = objects.pri_motor_meter;
-//                 //lv_meter_set_indicator_value(objects.pri_motor_meter, indicator, new_val);
-//                 lv_anim_set_values(&pri_motor_meter_anim, cur_val, new_val);
-//                 lv_anim_start(&pri_motor_meter_anim);
-//                 tick_value_change_obj = NULL;
-//             }
-//         }
-//     }
+char cds_str[30] = {0};
+const char *get_var_cds_str() {
+  sprintf(cds_str, "%u", cds_value);
+  return cds_str;
+}
+void set_var_cds_str(const char *value) {}
